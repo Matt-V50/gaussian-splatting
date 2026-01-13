@@ -30,6 +30,7 @@ class CameraInfo(NamedTuple):
     FovY: np.array
     FovX: np.array
     depth_params: dict
+    image: np.array
     image_path: str
     image_name: str
     depth_path: str
@@ -309,7 +310,100 @@ def readNerfSyntheticInfo(path, white_background, depths, eval, extension=".png"
                            is_nerf_synthetic=True)
     return scene_info
 
+def readCamerasFromLerfTransforms(path, transformsfile, white_background, extension=".jpg"):
+    cam_infos = []
+
+    with open(os.path.join(path, transformsfile)) as json_file:
+        contents = json.load(json_file)
+        # fovx = contents["camera_angle_x"]
+
+        
+
+        frames = contents["frames"]
+        for idx, frame in enumerate(frames):
+            # cam_name = os.path.join(path, frame["file_path"])
+
+            tmp = np.array(frame["transform_matrix"])
+            tmp_R = tmp[:3,:3]
+            tmp_R = -tmp_R
+            tmp_R[:,0] = -tmp_R[:,0]
+            tmp[:3,:3] = tmp_R
+            matrix = np.linalg.inv(tmp)
+            # R = -np.transpose(matrix[:3,:3])
+            # R[:,0] = -R[:,0]
+            # T = -matrix[:3, 3]
+
+            # matrix[:3,1] *= -1
+            # matrix[:3,2] *= -1
+
+            R = np.transpose(matrix[:3,:3])
+            T = matrix[:3, 3]
+
+            image_path = os.path.join(path, frame["file_path"])
+            image_name = frame["file_path"].split("/")[-1].split(".")[0]
+            image = Image.open(image_path)
+
+            im_data = np.array(image.convert("RGBA"))
+
+            bg = np.array([1,1,1]) if white_background else np.array([0, 0, 0])
+
+            norm_data = im_data / 255.0
+            arr = norm_data[:,:,:3] * norm_data[:, :, 3:4] + bg * (1 - norm_data[:, :, 3:4])
+            image = Image.fromarray(np.array(arr*255.0, dtype=np.byte), "RGB")
+
+            # fovy = focal2fov(fov2focal(fovx, image.size[0]), image.size[1])
+            fovx = 2 * np.arctan(frame['w'] / (2 * frame['fl_x']))
+            fovy = 2 * np.arctan(frame['h'] / (2 * frame['fl_y']))
+
+            FovY = fovy 
+            FovX = fovx
+
+            cam_infos.append(CameraInfo(uid=idx, R=R, T=T, FovY=FovY, FovX=FovX, image=image,
+                            image_path=image_path, image_name=image_name, width=image.size[0], height=image.size[1], 
+                                        depth_path="", depth_params=None, is_test=False))
+            
+    return cam_infos
+
+def readLerfInfo(path, white_background, eval, extension=".png"):
+    print("Reading Training Transforms")
+    train_cam_infos = readCamerasFromLerfTransforms(path, "transforms.json", white_background, extension)
+    # print("Reading Test Transforms")
+    # test_cam_infos = readCamerasFromTransforms(path, "transforms_test.json", white_background, extension)
+    test_cam_infos = []
+    eval = False
+    if not eval:
+        train_cam_infos.extend(test_cam_infos)
+        test_cam_infos = []
+
+    nerf_normalization = getNerfppNorm(train_cam_infos)
+
+    ply_path = os.path.join(path, "points3d.ply")
+    if not os.path.exists(ply_path):
+        # Since this data set has no colmap data, we start with random points
+        num_pts = 100_000
+        print(f"Generating random point cloud ({num_pts})...")
+        
+        # We create random points inside the bounds of the synthetic Blender scenes
+        xyz = np.random.random((num_pts, 3)) * 2.6 - 1.3
+        shs = np.random.random((num_pts, 3)) / 255.0
+        pcd = BasicPointCloud(points=xyz, colors=SH2RGB(shs), normals=np.zeros((num_pts, 3)))
+
+        storePly(ply_path, xyz, SH2RGB(shs) * 255)
+    try:
+        pcd = fetchPly(ply_path)
+    except:
+        pcd = None
+
+    scene_info = SceneInfo(point_cloud=pcd,
+                           train_cameras=train_cam_infos,
+                           test_cameras=test_cam_infos,
+                           nerf_normalization=nerf_normalization,
+                           ply_path=ply_path,
+                           is_nerf_synthetic=False)
+    return scene_info
+
 sceneLoadTypeCallbacks = {
     "Colmap": readColmapSceneInfo,
-    "Blender" : readNerfSyntheticInfo
+    "Blender" : readNerfSyntheticInfo,
+    "Lerf" : readLerfInfo
 }

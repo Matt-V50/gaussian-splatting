@@ -1,0 +1,43 @@
+
+# Create environment
+ENV_NAME="your_env_name"  # 替换为你想要的环境名称
+conda create -y -n GS python=3.10.12
+conda activate GS
+
+# PyTorch + CUDA 12.1
+conda install pytorch==2.4.1 torchvision torchaudio pytorch-cuda==12.1 -c pytorch -c nvidia --yes
+conda install cuda-toolkit -c nvidia/label/cuda-12.1.0 --yes
+
+# 解决 undefined symbol: iJIT_NotifyEvent
+conda install mkl==2023.1.0 mkl-include -c conda-forge --yes
+
+# 解决 cannot find -lcudart
+conda install cuda-cudart==12.1.55 -c nvidia/label/cuda-12.1.0 --yes
+pip install iopath
+pip install plyfile==1.1 \
+tqdm \
+hdbscan \
+matplotlib \
+dearpygui \
+opencv-python==4.10.0.84 \
+open-clip-torch \
+joblib==1.4.2 \
+open3d==0.18.0 \
+lpips==0.1.4 \
+trimesh==4.3.2 \
+pillow==11.0.0 \
+triton
+
+# 安装 submodules
+# --no-build-isolation for pip version >= 25.3/
+# pip version 24.2 works fine without this flag.
+CUDA_HOME=$CONDA_PREFIX pip install --no-build-isolation \
+    submodules/diff-gaussian-rasterization/ \
+    submodules/simple-knn/ \
+    submodules/fused-ssim \
+
+pip install --no-index --no-cache-dir pytorch3d -f https://dl.fbaipublicfiles.com/pytorch3d/packaging/wheels/py310_cu121_pyt241/download.html
+# 
+pip install -U openmim
+mim install mmcv==2.1.0 mmdet==3.2.0 mmdet3d==1.4.0 mmengine==0.10.6 
+pip install numpy==1.24.0 matplotlib==3.5.3

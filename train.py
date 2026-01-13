@@ -9,6 +9,7 @@
 # For inquiries contact  george.drettakis@inria.fr
 #
 
+import json
 import os
 import torch
 from random import randint
@@ -39,6 +40,44 @@ try:
     SPARSE_ADAM_AVAILABLE = True
 except:
     SPARSE_ADAM_AVAILABLE = False
+    
+    
+class Timer:
+    def __init__(self):
+        self._iter_start = torch.cuda.Event(enable_timing = True)
+        self._iter_end = torch.cuda.Event(enable_timing = True)
+        self._optim_start = torch.cuda.Event(enable_timing = True)
+        self._optim_end = torch.cuda.Event(enable_timing = True)
+        self.total_render_time = 0.0
+        self.total_optim_time = 0.0
+    
+    def iter_start(self):
+        self._iter_start.record()
+    
+    def iter_end(self):
+        self._iter_end.record()
+        torch.cuda.synchronize()
+        self.total_render_time += self._iter_start.elapsed_time(self._iter_end) / 1e3 # ms to s
+
+    def optim_start(self):
+        self._optim_start.record()
+
+    def optim_end(self):
+        self._optim_end.record()
+        torch.cuda.synchronize()
+        self.total_optim_time += self._optim_start.elapsed_time(self._optim_end) / 1e3 # ms to s
+        
+    @property
+    def total_times(self):
+        return self.total_render_time + self.total_optim_time
+
+    @property
+    def metrics(self):
+        return {
+            "train_times": self.total_times,
+            "train_render_times": self.total_render_time,
+            "train_optimal_times": self.total_optim_time
+        }
 
 def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoint_iterations, checkpoint, debug_from):
 
@@ -46,7 +85,6 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         sys.exit(f"Trying to use sparse adam but it is not installed, please install the correct rasterizer using pip install [3dgs_accel].")
 
     first_iter = 0
-    tb_writer = prepare_output_and_logger(dataset)
     gaussians = GaussianModel(dataset.sh_degree, opt.optimizer_type)
     scene = Scene(dataset, gaussians)
     gaussians.training_setup(opt)
@@ -57,8 +95,8 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     bg_color = [1, 1, 1] if dataset.white_background else [0, 0, 0]
     background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
 
-    iter_start = torch.cuda.Event(enable_timing = True)
-    iter_end = torch.cuda.Event(enable_timing = True)
+    # iter_start = torch.cuda.Event(enable_timing = True)
+    # iter_end = torch.cuda.Event(enable_timing = True)
 
     use_sparse_adam = opt.optimizer_type == "sparse_adam" and SPARSE_ADAM_AVAILABLE 
     depth_l1_weight = get_expon_lr_func(opt.depth_l1_weight_init, opt.depth_l1_weight_final, max_steps=opt.iterations)
@@ -70,6 +108,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
 
     progress_bar = tqdm(range(first_iter, opt.iterations), desc="Training progress")
     first_iter += 1
+    timer = Timer()
     for iteration in range(first_iter, opt.iterations + 1):
         if network_gui.conn == None:
             network_gui.try_connect()
@@ -86,7 +125,8 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             except Exception as e:
                 network_gui.conn = None
 
-        iter_start.record()
+        # iter_start.record()
+        timer.iter_start()
 
         gaussians.update_learning_rate(iteration)
 
@@ -141,7 +181,8 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
 
         loss.backward()
 
-        iter_end.record()
+        # iter_end.record()
+        timer.iter_end()
 
         with torch.no_grad():
             # Progress bar
@@ -155,11 +196,12 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 progress_bar.close()
 
             # Log and save
-            training_report(tb_writer, iteration, Ll1, loss, l1_loss, iter_start.elapsed_time(iter_end), testing_iterations, scene, render, (pipe, background, 1., SPARSE_ADAM_AVAILABLE, None, dataset.train_test_exp), dataset.train_test_exp)
+            # training_report(tb_writer, iteration, Ll1, loss, l1_loss, iter_start.elapsed_time(iter_end), testing_iterations, scene, render, (pipe, background, 1., SPARSE_ADAM_AVAILABLE, None, dataset.train_test_exp), dataset.train_test_exp)
             if (iteration in saving_iterations):
                 print("\n[ITER {}] Saving Gaussians".format(iteration))
                 scene.save(iteration)
 
+            timer.optim_start()
             # Densification
             if iteration < opt.densify_until_iter:
                 # Keep track of max radii in image-space for pruning
@@ -184,12 +226,16 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 else:
                     gaussians.optimizer.step()
                     gaussians.optimizer.zero_grad(set_to_none = True)
+            timer.optim_end()
 
             if (iteration in checkpoint_iterations):
                 print("\n[ITER {}] Saving Checkpoint".format(iteration))
                 torch.save((gaussians.capture(), iteration), scene.model_path + "/chkpnt" + str(iteration) + ".pth")
+    print(f"Gaussian number: {gaussians._xyz.shape[0]}")
+    with open(os.path.join(args.model_path, "training_time.json"), 'w') as f:
+        json.dump(timer.metrics, f)
 
-def prepare_output_and_logger(args):    
+def prepare_output_and_logger(args):
     if not args.model_path:
         if os.getenv('OAR_JOB_ID'):
             unique_str=os.getenv('OAR_JOB_ID')
@@ -279,6 +325,7 @@ if __name__ == "__main__":
     if not args.disable_viewer:
         network_gui.init(args.ip, args.port)
     torch.autograd.set_detect_anomaly(args.detect_anomaly)
+    prepare_output_and_logger(args)
     training(lp.extract(args), op.extract(args), pp.extract(args), args.test_iterations, args.save_iterations, args.checkpoint_iterations, args.start_checkpoint, args.debug_from)
 
     # All done

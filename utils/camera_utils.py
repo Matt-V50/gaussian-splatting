@@ -19,6 +19,11 @@ WARNED = False
 
 def loadCam(args, id, cam_info, resolution_scale, is_nerf_synthetic, is_test_dataset):
     image = Image.open(cam_info.image_path)
+    if image.mode == "RGBA":
+        # Composite onto a solid background instead of masking the loss with alpha,
+        # so empty space is supervised and floaters there get penalized.
+        bg = Image.new("RGBA", image.size, (255, 255, 255, 255) if args.white_background else (0, 0, 0, 255))
+        image = Image.alpha_composite(bg, image).convert("RGB")
 
     if cam_info.depth_path != "":
         try:
